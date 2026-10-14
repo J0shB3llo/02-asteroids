@@ -152,12 +152,21 @@ class Ship {
     this.invincible    = 3;
     this.shootCooldown = 0;
     this.dead          = false;
+    // Reiniciar control de powerups por vida
+    powerupSpawnedThisLife = false;
+    destroyedAsteroidsThisLife = 0;
+    forceSpawnAt = randInt(1, 5);
+    powerups = powerups || [];
+    // Boosts almacenados
+    this.boosts = 0;     // contador de powerups tipo boost recogidos
+    this._boostTTL = 0;  // tiempo restante del boost activo (s)
   }
 
   update(dt) {
     if (this.dead) return;
     if (this.invincible    > 0) this.invincible    -= dt;
     if (this.shootCooldown > 0) this.shootCooldown -= dt;
+    if (this._boostTTL > 0) this._boostTTL -= dt;
 
     const ROT   = 3.5;   // rad/s
     const THRUST = 260;  // px/s²
@@ -168,8 +177,10 @@ class Ship {
 
     this.thrusting = !!keys['ArrowUp'];
     if (this.thrusting) {
-      this.vx += Math.cos(this.angle) * THRUST * dt;
-      this.vy += Math.sin(this.angle) * THRUST * dt;
+      // Aplicar boost si está activo: +15% de thrust hacia adelante
+      const boostFactor = this._boostTTL > 0 ? 1.15 : 1.0;
+      this.vx += Math.cos(this.angle) * THRUST * boostFactor * dt;
+      this.vy += Math.sin(this.angle) * THRUST * boostFactor * dt;
     }
 
     this.vx *= DRAG;
@@ -185,6 +196,21 @@ class Ship {
     const ox = this.x + Math.cos(this.angle) * NOSE;
     const oy = this.y + Math.sin(this.angle) * NOSE;
     return [new Bullet(ox, oy, this.angle)];
+  }
+
+  // Intentar activar un boost si hay disponibles. Devuelve true si se activó.
+  activateBoost() {
+    if (this.dead) return false;
+    if (this.boosts > 0 && this._boostTTL <= 0) {
+      this.boosts--;
+      this._boostTTL = 0.3; // 300 ms
+      // Aplicar un pequeño impulso inmediato hacia adelante para que el boost sea perceptible
+      const IMPULSE = 60; // px/s de impulso instantáneo
+      this.vx += Math.cos(this.angle) * IMPULSE;
+      this.vy += Math.sin(this.angle) * IMPULSE;
+      return true;
+    }
+    return false;
   }
 
   draw() {
@@ -254,11 +280,65 @@ class Particle {
   }
 }
 
+// ── Powerup ───────────────────────────────────────────────────────────────────
+class PowerUp {
+  constructor(x, y) {
+    this.x = x;
+    this.y = y;
+    const angle = rand(0, Math.PI * 2);
+    const speed = rand(20, 60);
+    this.vx = Math.cos(angle) * speed;
+    this.vy = Math.sin(angle) * speed;
+    this.radius = 10;
+    this.life = 8; // segundos antes de desaparecer
+    this.ttl = this.life;
+    this.dead = false;
+    this.type = 'boost'; // tipo: boost de velocidad
+  }
+
+  update(dt) {
+    this.x = wrap(this.x + this.vx * dt, W);
+    this.y = wrap(this.y + this.vy * dt, H);
+    this.ttl -= dt;
+    if (this.ttl <= 0) this.dead = true;
+  }
+
+  draw() {
+    const alpha = Math.max(0.25, this.ttl / this.life);
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.strokeStyle = `rgba(255,200,0,${alpha.toFixed(2)})`;
+    ctx.fillStyle   = `rgba(255,180,0,${alpha.toFixed(2)})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    // Icono simple: cruz de vida
+    // Icono: rayo (boost)
+    ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(2)})`;
+    ctx.beginPath();
+    ctx.moveTo(-2, -6);
+    ctx.lineTo(4, -2);
+    ctx.lineTo(0, -2);
+    ctx.lineTo(6, 6);
+    ctx.lineTo(0, 0);
+    ctx.lineTo(2, 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
 // ── Estado del juego ──────────────────────────────────────────────────────────
-let ship, bullets, asteroids, particles;
+let ship, bullets, asteroids, particles, powerups;
 let score, lives, level;
 let state;      // 'playing' | 'dead' | 'gameover'
 let deadTimer;
+
+// Powerup: control por vida
+let powerupSpawnedThisLife = false; // si ya apareció un powerup en la vida actual
+let destroyedAsteroidsThisLife = 0; // contador de asteroides destruidos en la vida
+let forceSpawnAt = 1;               // en qué destrucción forzar spawn (aleatorio al iniciar vida)
 
 function spawnAsteroids(count) {
   const SAFE_DIST = 130;
@@ -277,6 +357,7 @@ function initGame() {
   bullets   = [];
   asteroids = [];
   particles = [];
+  powerups  = [];
   score  = 0;
   lives  = 3;
   level  = 1;
@@ -288,12 +369,17 @@ function nextLevel() {
   level++;
   bullets   = [];
   particles = [];
+  powerups  = [];
   ship.reset();
   spawnAsteroids(3 + level);
 }
 
 function explode(x, y, count = 8) {
   for (let i = 0; i < count; i++) particles.push(new Particle(x, y));
+}
+
+function spawnPowerup(x, y) {
+  powerups.push(new PowerUp(x, y));
 }
 
 function killShip() {
@@ -326,9 +412,14 @@ function update(dt) {
     return;
   }
 
-  // Disparar
+  // Disparar con ESPACIO
   if (pressed('Space')) {
     bullets.push(...ship.tryShoot());
+  }
+
+  // Activar boost con X
+  if (pressed('KeyX')) {
+    ship.activateBoost();
   }
 
   ship.update(dt);
@@ -338,6 +429,20 @@ function update(dt) {
 
   bullets   = bullets.filter(b => !b.dead);
   particles = particles.filter(p => !p.dead);
+
+  // Actualizar powerups y detectar recogida por la nave
+  powerups.forEach(p => p.update(dt));
+  for (const p of powerups) {
+    if (!p.dead && dist(ship, p) < ship.radius + p.radius) {
+      if (p.type === 'boost') {
+        ship.boosts = (ship.boosts || 0) + 1;
+        explode(p.x, p.y, 10);
+      }
+      p.dead = true;
+      powerupSpawnedThisLife = true; // marcar como generado/recogido
+    }
+  }
+  powerups = powerups.filter(p => !p.dead);
 
   // Bala vs asteroide
   const newAsteroids = [];
@@ -349,6 +454,18 @@ function update(dt) {
         score += POINTS[a.size];
         explode(a.x, a.y, a.size * 5);
         newAsteroids.push(...a.split());
+
+        // Si el asteroide fue destruido por completo (tamaño 1), intentar spawn de powerup
+        if (a.size <= 1) {
+          destroyedAsteroidsThisLife++;
+          if (!powerupSpawnedThisLife) {
+            const P = 0.22; // probabilidad por destrucción
+            if (Math.random() < P || destroyedAsteroidsThisLife >= forceSpawnAt) {
+              spawnPowerup(a.x, a.y);
+              powerupSpawnedThisLife = true;
+            }
+          }
+        }
       }
     }
   }
@@ -399,6 +516,10 @@ function drawHUD() {
 
   for (let i = 0; i < lives; i++)
     drawLifeIcon(W - 16 - i * 22, 18);
+  // Mostrar contador de boosts disponibles en esquina inferior izquierda
+  const boosts = (ship && ship.boosts) || 0;
+  ctx.textAlign = 'left';
+  ctx.fillText(`BOOSTS ${boosts}`, 14, H - 14);
 
 }
 
@@ -419,6 +540,7 @@ function draw() {
   particles.forEach(p => p.draw());
   asteroids.forEach(a => a.draw());
   bullets.forEach(b => b.draw());
+  powerups.forEach(p => p.draw());
   ship.draw();
 
   drawHUD();
